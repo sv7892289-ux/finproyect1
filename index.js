@@ -344,3 +344,26 @@ btnAceptarReinicio.addEventListener("click", async () => {
     setMsg("Aceptaste. Esperando al otro jugador…", "ok");
   }
 });
+// === Reiniciar partida directamente (sin revancha) ===
+btnReiniciar.addEventListener("click", async () => {
+  if (!currentUser || !partidaRef) return;
+
+  const snap = await getDoc(partidaRef);
+  if (!snap.exists()) return;
+  const partida = snap.data();
+
+  // Solo los jugadores pueden reiniciar
+  const soyJugador = [partida.jugadores?.X, partida.jugadores?.O].includes(currentUser.email);
+  if (!soyJugador) return setMsg("Solo los jugadores pueden reiniciar.", "warn");
+
+  // Reiniciar la partida: resetear tablero, turno, ganador
+  await updateDoc(partidaRef, {
+    estado: "playing",
+    turno: "X", // o quien empezó antes
+    tablero: ["", "", "", "", "", "", "", "", ""],
+    ganador: null,
+    revancha: null // limpiar revancha si existe
+  });
+
+  setMsg("Partida reiniciada. ¡A jugar!", "ok");
+});
