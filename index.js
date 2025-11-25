@@ -54,8 +54,8 @@ const po = document.getElementById("po");
 const pganador = document.getElementById("pganador");
 const tableroDiv = document.getElementById("tablero");
 
-const btnReiniciar = document.getElementById("btnReiniciar");           
-const btnAceptarReinicio = document.getElementById("btnAceptarReinicio"); 
+const btnReiniciar = document.getElementById("btnReiniciar");
+const btnAceptarReinicio = document.getElementById("btnAceptarReinicio");
 
 const estadoAuth = document.getElementById("estadoAuth");
 const mensaje = document.getElementById("mensaje");
@@ -123,7 +123,7 @@ btnCrearPartida.addEventListener("click", async () => {
     tablero: ["", "", "", "", "", "", "", "", ""],
     jugadores: { X: currentUser.email, O: null },
     ganador: null,
-    revancha: null, 
+    revancha: null,
     creadaEn: serverTimestamp()
   };
 
@@ -135,7 +135,7 @@ btnCrearPartida.addEventListener("click", async () => {
     // ✅ Mostrar el ID claramente
     setMsg(`✅ Partida creada. ID: ${partidaId}`, "ok");
     // Opcional: copiar al portapapeles
-    navigator.clipboard?.writeText(partidaId).catch(() => {});
+    navigator.clipboard?.writeText(partidaId).catch(() => { });
   } catch (e) {
     console.error("Error al crear partida:", e);
     setMsg("Error al crear partida: " + e.message, "err");
@@ -217,10 +217,10 @@ function cargarPartida(id) {
 
       btnAceptarReinicio.style.display =
         partida.estado === "ended" &&
-        partida.revancha?.activa &&
-        soyJugador &&
-        !soySolicitante &&
-        !yaConfirme
+          partida.revancha?.activa &&
+          soyJugador &&
+          !soySolicitante &&
+          !yaConfirme
           ? "inline-block"
           : "none";
 
@@ -267,11 +267,206 @@ function renderTablero(tablero, partida) {
 
 function verificarGanador(t) {
   const c = [
-    [0,1,2],[3,4,5],[6,7,8],
-    [0,3,6],[1,4,7],[2,5,8],
-    [0,4,8],[2,4,6]
+    [0, 1, 2], [3, 4, 5], [6, 7, 8],
+    [0, 3, 6], [1, 4, 7], [2, 5, 8],
+    [0, 4, 8], [2, 4, 6]
   ];
-  for (const [a,b,cx] of c) {
+  for (const [a, b, cx] of c) {
+    if (t[a] && t[a] === t[b] && t[a] === t[cx]) return t[a];
+  }
+  return t.includes("") ? null : "Empate";
+}
+
+// === Revancha: enviar solicitud ===
+btnReiniciar.addEventListener("click", async () => {
+  if (!currentUser || !partidaRef) return;
+
+  const snap = await getDoc(partidaRef);
+  if (!snap.exists()) return;
+  const partida = snap.data();
+  if (partida.estado !== "ended") return;
+
+  const soyJugador = [partida.jugadores?.X, partida.jugadores?.O].includes(currentUser.email);
+  if (!soyJugador) return setMsg("Solo los jugadores pueden solicitar revancha.", "warn");
+
+  await updateDoc(partidaRef, {
+    revancha: {
+      solicitante: currentUser.email,
+      confirmaciones: [currentUser.email],
+      activa: true,
+      nuevaId: null,
+      ts: serverTimestamp()
+    }
+  });
+  setMsg("Solicitud enviada. Esperando aceptación del otro jugador…", "ok");
+});
+
+// === Revancha: aceptar ===
+btnAceptarReinicio.addEventListener("click", async () => {
+  if (!currentUser || !partidaRef) return;
+
+  const snap = await getDoc(partidaRef);
+  if (!snap.exists()) return;
+  const partida = snap.data();
+
+  if (!partida.revancha?.activa) return;
+  const soyJugador = [partida.jugadores?.X, partida.jugadores?.O].includes(currentUser.email);
+  if (!soyJugador) return setMsg("Solo los jugadores pueden aceptar.", "warn");
+
+  await updateDoc(partidaRef, {
+    "revancha.confirmaciones": arrayUnion(currentUser.email)
+  });
+
+  const snap2 = await getDoc(partidaRef);
+  const p2 = snap2.data();
+  const confs = p2.revancha?.confirmaciones || [];
+  const ambosConfirmaron = [p2.jugadores?.X, p2.jugadores?.O].every(e => confs.includes(e));
+
+  if (ambosConfirmaron) {
+    const nuevaPartida = {
+      estado: "playing",
+      turno: "X",
+      tablero: ["", "", "", "", "", "", "", "", ""],
+      jugadores: { X: p2.jugadores.O, O: p2.jugadores.X },
+      ganador: null,
+      revancha: null,
+      creadaEn: serverTimestamp()
+    };
+
+    const nuevaRef = await addDoc(collection(db, "partidas"), nuevaPartida);
+    await updateDoc(partidaRef, {
+      "revancha.nuevaId": nuevaRef.id,
+      "revancha.activa": false
+    });
+    cargarPartida(nuevaRef.id);
+    if (!currentUser) return setMsg("Inicia sesión primero.", "warn");
+    const id = (codigoPartida.value || "").trim();
+    if (!id) return setMsg("Escribe un ID de partida.", "warn");
+
+    const ref = doc(db, "partidas", id);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return setMsg("Partida no encontrada.", "err");
+
+    const partida = snap.data();
+    if (partida.jugadores.O) return setMsg("La partida ya está llena.", "warn");
+
+    await updateDoc(ref, {
+      jugadores: { ...partida.jugadores, O: currentUser.email },
+      estado: "playing"
+    });
+
+    partidaId = id;
+    miSimbolo = "O";
+    cargarPartida(id);
+    setMsg("Te uniste como O.", "ok");
+  });
+
+// === Ver partida (modo espectador o jugador ya dentro) ===
+btnVerPartida.addEventListener("click", () => {
+  const id = (codigoPartida.value || "").trim();
+  if (!id) return setMsg("Escribe un ID de partida.", "warn");
+  partidaId = id;
+  cargarPartida(id);
+});
+
+// === Escuchar/Renderizar partida ===
+function cargarPartida(id) {
+  if (stopListener) { stopListener(); stopListener = null; }
+
+  tableroDiv.innerHTML = "";
+  pganador.textContent = "—";
+  panelPartida.style.display = "block";
+  partidaRef = doc(db, "partidas", id);
+
+  stopListener = onSnapshot(
+    partidaRef,
+    (snap) => {
+      if (!snap.exists()) {
+        setMsg("Partida no encontrada.", "err");
+        return;
+      }
+      const partida = snap.data();
+      pid.textContent = id;
+      pestado.textContent = partida.estado || "—";
+      pturno.textContent = partida.turno || "—";
+      px.textContent = partida.jugadores?.X || "—";
+      po.textContent = partida.jugadores?.O || "—";
+      pganador.textContent = partida.ganador || "—";
+
+      if (currentUser) {
+        if (partida.jugadores?.X === currentUser.email) miSimbolo = "X";
+        else if (partida.jugadores?.O === currentUser.email) miSimbolo = "O";
+        else miSimbolo = null;
+      }
+
+      renderTablero(partida.tablero || [], partida);
+
+      btnReiniciar.style.display =
+        partida.estado === "ended" && (!partida.revancha || !partida.revancha.activa)
+          ? "inline-block"
+          : "none";
+
+      const soyJugador = [partida.jugadores?.X, partida.jugadores?.O].includes(currentUser?.email);
+      const soySolicitante = partida.revancha?.solicitante === currentUser?.email;
+      const yaConfirme = (partida.revancha?.confirmaciones || []).includes(currentUser?.email);
+
+      btnAceptarReinicio.style.display =
+        partida.estado === "ended" &&
+          partida.revancha?.activa &&
+          soyJugador &&
+          !soySolicitante &&
+          !yaConfirme
+          ? "inline-block"
+          : "none";
+
+      if (partida.revancha?.nuevaId && partida.revancha.nuevaId !== partidaId) {
+        partidaId = partida.revancha.nuevaId;
+        cargarPartida(partidaId);
+      }
+    },
+    (err) => {
+      console.error("Error en onSnapshot:", err);
+      setMsg("Error al escuchar partida: " + err.message, "err");
+    }
+  );
+}
+
+function renderTablero(tablero, partida) {
+  tableroDiv.innerHTML = "";
+  tablero.forEach((valor, i) => {
+    const celda = document.createElement("div");
+    celda.className = "celda";
+    if (valor === "X") celda.classList.add("x");
+    if (valor === "O") celda.classList.add("o");
+    celda.textContent = valor;
+
+    celda.addEventListener("click", async () => {
+      if (!currentUser) return;
+      if (partida.estado !== "playing") return;
+      if (partida.turno !== miSimbolo) return;
+      if (tablero[i]) return;
+
+      const nuevoTablero = [...tablero];
+      nuevoTablero[i] = miSimbolo;
+      const ganador = verificarGanador(nuevoTablero);
+      await updateDoc(partidaRef, {
+        tablero: nuevoTablero,
+        turno: miSimbolo === "X" ? "O" : "X",
+        estado: ganador ? "ended" : "playing",
+        ganador: ganador
+      });
+    });
+    tableroDiv.appendChild(celda);
+  });
+}
+
+function verificarGanador(t) {
+  const c = [
+    [0, 1, 2], [3, 4, 5], [6, 7, 8],
+    [0, 3, 6], [1, 4, 7], [2, 5, 8],
+    [0, 4, 8], [2, 4, 6]
+  ];
+  for (const [a, b, cx] of c) {
     if (t[a] && t[a] === t[b] && t[a] === t[cx]) return t[a];
   }
   return t.includes("") ? null : "Empate";
@@ -343,27 +538,4 @@ btnAceptarReinicio.addEventListener("click", async () => {
   } else {
     setMsg("Aceptaste. Esperando al otro jugador…", "ok");
   }
-});
-// === Reiniciar partida directamente (sin revancha) ===
-btnReiniciar.addEventListener("click", async () => {
-  if (!currentUser || !partidaRef) return;
-
-  const snap = await getDoc(partidaRef);
-  if (!snap.exists()) return;
-  const partida = snap.data();
-
-  // Solo los jugadores pueden reiniciar
-  const soyJugador = [partida.jugadores?.X, partida.jugadores?.O].includes(currentUser.email);
-  if (!soyJugador) return setMsg("Solo los jugadores pueden reiniciar.", "warn");
-
-  // Reiniciar la partida: resetear tablero, turno, ganador
-  await updateDoc(partidaRef, {
-    estado: "playing",
-    turno: "X", // o quien empezó antes
-    tablero: ["", "", "", "", "", "", "", "", ""],
-    ganador: null,
-    revancha: null // limpiar revancha si existe
-  });
-
-  setMsg("Partida reiniciada. ¡A jugar!", "ok");
 });
